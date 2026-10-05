@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kafka Pipeline — Monitoring Dashboard</title>
+
+  <!-- Chart.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+    /* ---------- Theme tokens ---------- */
+    :root {
+      --bg:        #0e1117;
+      --surface:   #161b22;
+      --surface-2: #1c2330;
+      --border:    #283040;
+      --text:      #e6edf3;
+      --text-dim:  #8b949e;
+      --accent:    #4f8cff;
+      --green:     #2ea043;
+      --yellow:    #d29922;
+      --red:       #f85149;
+      --radius:    14px;
+      --shadow:    0 4px 24px rgba(0,0,0,.35);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+
+    /* ---------- Header ---------- */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    header h1 { font-size: 22px; font-weight: 600; }
+    header h1 span { color: var(--accent); }
+    .header-meta { display: flex; align-items: center; gap: 16px; font-size: 13px; color: var(--text-dim); }
+    .live-dot {
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .live-dot::before {
+      content: ""; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green); box-shadow: 0 0 8px var(--green);
+      animation: pulse 1.4s infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+    /* ---------- Layout helpers ---------- */
+    .section-title {
+      font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+      color: var(--text-dim); margin: 28px 0 14px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    .cards   { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+    .status  { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+    .charts  { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .two-col { grid-template-columns: 1.4fr 1fr; align-items: start; }
+    @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+    /* ---------- Live Kafka -> Postgres flow ---------- */
+    .flow {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; flex-wrap: wrap;
+    }
+    .flow-node {
+      flex: 1 1 120px; text-align: center; padding: 14px 8px;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .flow-node .flow-icon  { font-size: 26px; }
+    .flow-node .flow-val   { font-size: 26px; font-weight: 700; margin-top: 4px; }
+    .flow-node .flow-label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+    .flow-node.transit .flow-val { color: var(--yellow); }
+    .flow-node.db .flow-val      { color: var(--green); }
+
+    /* The animated "pipe" with dots traveling left -> right */
+    .flow-pipe {
+      flex: 1 1 60px; height: 4px; position: relative;
+      background: var(--border); border-radius: 4px; overflow: hidden;
+      min-width: 50px;
+    }
+    .flow-pipe .dot {
+      position: absolute; top: -3px; width: 10px; height: 10px;
+      border-radius: 50%; background: var(--accent); opacity: 0;
+    }
+    /* When data is moving, show 3 dots sliding across the pipe */
+    .flow-pipe.active .dot { opacity: 1; animation: slide 1s linear infinite; }
+    .flow-pipe.active .dot:nth-child(2) { animation-delay: .33s; }
+    .flow-pipe.active .dot:nth-child(3) { animation-delay: .66s; }
+    @keyframes slide {
+      from { left: -10px; } to { left: 100%; }
+    }
+
+    /* ---------- Cards ---------- */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .stat-card .label {
+      font-size: 13px; color: var(--text-dim); margin-bottom: 8px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .stat-card .value { font-size: 30px; font-weight: 700; }
+    .stat-card .value small { font-size: 14px; color: var(--text-dim); font-weight: 400; }
+    .stat-card .icon { font-size: 16px; }
+
+    /* ---------- Status pills ---------- */
+    .status-item {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .status-item .name { font-size: 14px; }
+    .pill {
+      font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--surface-2); color: var(--text-dim);
+    }
+    .pill::before { content:""; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+    .pill.online  { color: var(--green);  background: rgba(46,160,67,.12); }
+    .pill.online::before  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .pill.offline { color: var(--red);    background: rgba(248,81,73,.12); }
+    .pill.offline::before { background: var(--red); }
+    .pill.unknown { color: var(--yellow); background: rgba(210,153,34,.12); }
+    .pill.unknown::before  { background: var(--yellow); }
+
+    /* ---------- Charts ---------- */
+    .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+    .chart-wrap { position: relative; height: 240px; }
+
+    /* ---------- Upload ---------- */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 32px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      background: var(--surface);
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--accent);
+      background: var(--surface-2);
+    }
+    .dropzone .big { font-size: 32px; margin-bottom: 8px; }
+    .dropzone p { color: var(--text-dim); font-size: 14px; }
+    .dropzone strong { color: var(--text); }
+    .upload-status { margin-top: 12px; font-size: 13px; min-height: 18px; }
+    .upload-status.ok  { color: var(--green); }
+    .upload-status.err { color: var(--red); }
+
+    /* ---------- Table ---------- */
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    thead th {
+      text-align: left; color: var(--text-dim); font-weight: 600;
+      font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+      padding: 10px 12px; border-bottom: 1px solid var(--border);
+    }
+    tbody td { padding: 11px 12px; border-bottom: 1px solid var(--border); }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--surface-2); }
+    .badge {
+      font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+    }
+    .badge.inserted  { color: var(--green);  background: rgba(46,160,67,.12); }
+    .badge.duplicate { color: var(--yellow); background: rgba(210,153,34,.12); }
+    .badge.failed    { color: var(--red);    background: rgba(248,81,73,.12); }
+
+    /* ---------- States ---------- */
+    .muted { color: var(--text-dim); }
+    .empty-row td { text-align: center; color: var(--text-dim); padding: 24px; }
+    .skeleton {
+      display: inline-block; height: 1em; width: 60px; border-radius: 4px;
+      background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 37%, var(--surface-2) 63%);
+      background-size: 400% 100%; animation: shimmer 1.4s infinite;
+    }
+    @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+    .error-banner {
+      display: none;
+      background: rgba(248,81,73,.12); color: var(--red);
+      border: 1px solid rgba(248,81,73,.3);
+      border-radius: var(--radius); padding: 12px 16px; margin-bottom: 20px;
+      font-size: 14px;
+    }
+    .error-banner.show { display: block; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Kafka <span>Pipeline</span> Monitor</h1>
+    <div class="header-meta">
+      <span class="live-dot">Live · refreshing every 1s</span>
+      <span id="lastUpdated">—</span>
+    </div>
+  </header>
+
+  <!-- Global API error banner -->
+  <div class="error-banner" id="errorBanner"></div>
+
+  <!-- ============ STAT CARDS ============ -->
+  <div class="grid cards">
+    <div class="card stat-card">
+      <div class="label"><span class="icon">📦</span> Total Processed</div>
+      <div class="value" id="stat-processed"><span class="skeleton"></span></div>
+    </div>
+    <div class="card stat-card">
+      <div class="label"><span class="icon">✅</span> Total Inserted</div>
+      <div class="value" id="stat-inserted"><span class="skeleton"></span></div>
+    </div>
+    <div class="card stat-card">
+      <div class="label"><span class="icon">♻️</span> Duplicate Records</div>
+      <div class="value" id="stat-duplicate"><span class="skeleton"></span></div>
+    </div>
+    <div class="card stat-card">
+      <div class="label"><span class="icon">📨</span> Kafka Messages</div>
+      <div class="value" id="stat-kafka"><span class="skeleton"></span></div>
+    </div>
+    <div class="card stat-card">
+      <div class="label"><span class="icon">⚙️</span> Active Workers</div>
+      <div class="value" id="stat-workers"><span class="skeleton"></span></div>
+    </div>
+    <div class="card stat-card">
+      <div class="label"><span class="icon">⏱️</span> Total Processing Time</div>
+      <div class="value" id="stat-total-time"><span class="skeleton"></span></div>
+    </div>
+    <div class="card stat-card">
+      <div class="label"><span class="icon">🚀</span> Kafka / sec</div>
+      <div class="value" id="stat-kafka-rate"><span class="skeleton"></span></div>
+    </div>
+    <div class="card stat-card">
+      <div class="label"><span class="icon">💾</span> Inserts / sec</div>
+      <div class="value" id="stat-insert-rate"><span class="skeleton"></span></div>
+    </div>
+  </div>
+
+  <!-- ============ SYSTEM STATUS ============ -->
+  <div class="section-title">System Status</div>
+  <div class="grid status">
+    <div class="card status-item">
+      <span class="name">Redis</span>
+      <span class="pill unknown" id="status-redis">checking</span>
+    </div>
+    <div class="card status-item">
+      <span class="name">Kafka</span>
+      <span class="pill unknown" id="status-kafka">checking</span>
+    </div>
+    <div class="card status-item">
+      <span class="name">PostgreSQL</span>
+      <span class="pill unknown" id="status-postgres">checking</span>
+    </div>
+    <div class="card status-item">
+      <span class="name">TCP Server</span>
+      <span class="pill unknown" id="status-tcp">checking</span>
+    </div>
+  </div>
+
+  <!-- ============ CHARTS ============ -->
+  <div class="section-title">Throughput</div>
+  <div class="grid charts">
+    <div class="card chart-card">
+      <h3>Processing Rate</h3>
+      <div class="chart-wrap"><canvas id="processingChart"></canvas></div>
+    </div>
+    <div class="card chart-card">
+      <h3>Insert Rate</h3>
+      <div class="chart-wrap"><canvas id="insertChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- ============ LIVE FLOW: KAFKA -> POSTGRES ============ -->
+  <div class="section-title">Live Flow — Kafka → PostgreSQL</div>
+  <div class="card flow">
+    <div class="flow-node">
+      <div class="flow-icon">📨</div>
+      <div class="flow-val" id="flow-kafka">0</div>
+      <div class="flow-label">Sent to Kafka</div>
+    </div>
+
+    <div class="flow-pipe" id="pipe1">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    </div>
+
+    <div class="flow-node transit">
+      <div class="flow-icon">🚚</div>
+      <div class="flow-val" id="flow-transit">0</div>
+      <div class="flow-label">In Transit (waiting in Kafka)</div>
+    </div>
+
+    <div class="flow-pipe" id="pipe2">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    </div>
+
+    <div class="flow-node db">
+      <div class="flow-icon">🗄️</div>
+      <div class="flow-val" id="flow-inserted">0</div>
+      <div class="flow-label">Saved in PostgreSQL</div>
+    </div>
+  </div>
+
+  <!-- ============ UPLOAD + ACTIVITY ============ -->
+  <div class="grid two-col" style="margin-top: 28px;">
+
+    <!-- Recent activity -->
+    <div class="card">
+      <div class="section-title" style="margin-top:0;">Recent Activity</div>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Email</th><th>Status</th><th>Timestamp</th></tr>
+        </thead>
+        <tbody id="activityBody">
+          <tr class="empty-row"><td colspan="4">Loading activity…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- CSV upload -->
+    <div class="card">
+      <div class="section-title" style="margin-top:0;">Upload CSV</div>
+      <div class="dropzone" id="dropzone">
+        <div class="big">📂</div>
+        <p><strong>Drag &amp; drop</strong> your CSV here</p>
+        <p>or click to browse</p>
+        <input type="file" id="fileInput" accept=".csv" hidden />
+      </div>
+      <div class="upload-status" id="uploadStatus"></div>
+    </div>
+
+  </div>
+
+  <script>
+    /* =========================================================
+       CONFIG — change these paths if your Go routes differ.
+       ========================================================= */
+    const API = {
+      stats:      "/stats",
+      activities: "/activities",
+      health:     "/health",
+      upload:     "/upload",
+    };
+    const REFRESH_MS = 1000;   // refresh dashboard every 1 second
+
+    /* =========================================================
+       Small helpers
+       ========================================================= */
+
+    // Fetch JSON with timeout + clear errors. Returns parsed JSON or throws.
+    async function fetchJSON(url) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return await res.json();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function setText(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
+
+    // Turn a millisecond number into a friendly label: "850 ms" or "12.40 s".
+    function formatDuration(ms) {
+      if (ms < 1000) return ms + ' <small>ms</small>';
+      return (ms / 1000).toFixed(2) + ' <small>s</small>';
+    }
+
+    // Show/hide the global error banner.
+    function showError(message) {
+      const banner = document.getElementById("errorBanner");
+      banner.textContent = "⚠️ " + message;
+      banner.classList.add("show");
+    }
+    function clearError() {
+      document.getElementById("errorBanner").classList.remove("show");
+    }
+
+    function stamp() {
+      const d = new Date();
+      setText("lastUpdated", "Updated " + d.toLocaleTimeString());
+    }
+
+    /* =========================================================
+       1) loadStats() — GET /stats
+       ========================================================= */
+    async function loadStats() {
+      try {
+        const s = await fetchJSON(API.stats);
+        setText("stat-processed", s.processed ?? 0);
+        setText("stat-inserted",  s.inserted ?? 0);
+        setText("stat-duplicate", s.duplicate ?? 0);
+        setText("stat-kafka",     s.kafka_sent ?? 0);
+        setText("stat-workers",   s.workers ?? 0);
+
+        // Total real processing time: first record -> last insert.
+        document.getElementById("stat-total-time").innerHTML =
+          formatDuration(s.total_ms ?? 0);
+
+        // Live per-second rates from the backend rate meter.
+        setText("stat-kafka-rate",  (s.kafka_per_sec ?? 0) + "/s");
+        setText("stat-insert-rate", (s.insert_per_sec ?? 0) + "/s");
+
+        pushChartData(s.processed ?? 0, s.inserted ?? 0);
+        updateFlow(s.kafka_sent ?? 0, s.inserted ?? 0);
+        clearError();
+      } catch (err) {
+        showError("Failed to load stats: " + err.message);
+      }
+    }
+
+    // Show data moving from Kafka to PostgreSQL in real time.
+    // "In Transit" = messages sent to Kafka but not yet saved in Postgres.
+    let lastKafka = 0, lastInserted = 0;
+    function updateFlow(kafkaSent, inserted) {
+      const transit = Math.max(0, kafkaSent - inserted);
+      setText("flow-kafka",    kafkaSent);
+      setText("flow-transit",  transit);
+      setText("flow-inserted", inserted);
+
+      // Turn the moving dots ON only while data is actually flowing:
+      // pipe1 animates when new messages arrive in Kafka,
+      // pipe2 animates when new rows are being saved in Postgres.
+      togglePipe("pipe1", kafkaSent > lastKafka);
+      togglePipe("pipe2", inserted > lastInserted);
+      lastKafka = kafkaSent;
+      lastInserted = inserted;
+    }
+
+    function togglePipe(id, active) {
+      document.getElementById(id).classList.toggle("active", active);
+    }
+
+    /* =========================================================
+       2) loadActivities() — GET /activities
+       ========================================================= */
+    async function loadActivities() {
+      const body = document.getElementById("activityBody");
+      try {
+        const rows = await fetchJSON(API.activities);
+
+        if (!Array.isArray(rows) || rows.length === 0) {
+          body.innerHTML = '<tr class="empty-row"><td colspan="4">No recent activity</td></tr>';
+          return;
+        }
+
+        body.innerHTML = rows.map(function (r) {
+          const status = (r.status || "unknown").toLowerCase();
+          return (
+            "<tr>" +
+              "<td>" + escapeHtml(r.name)  + "</td>" +
+              "<td class='muted'>" + escapeHtml(r.email) + "</td>" +
+              "<td><span class='badge " + status + "'>" + escapeHtml(r.status) + "</span></td>" +
+              "<td class='muted'>" + escapeHtml(r.time) + "</td>" +
+            "</tr>"
+          );
+        }).join("");
+      } catch (err) {
+        body.innerHTML =
+          '<tr class="empty-row"><td colspan="4">Could not load activity (' +
+          escapeHtml(err.message) + ')</td></tr>';
+      }
+    }
+
+    /* =========================================================
+       3) updateStatus() — GET /health
+       ========================================================= */
+    async function updateStatus() {
+      const ids = {
+        redis:    "status-redis",
+        kafka:    "status-kafka",
+        postgres: "status-postgres",
+        tcp:      "status-tcp",
+      };
+      try {
+        const h = await fetchJSON(API.health);
+        Object.keys(ids).forEach(function (key) {
+          applyStatus(ids[key], h[key]);
+        });
+      } catch (err) {
+        // If health endpoint is unreachable, mark everything offline.
+        Object.keys(ids).forEach(function (key) {
+          applyStatus(ids[key], "offline");
+        });
+      }
+    }
+
+    function applyStatus(elId, value) {
+      const el = document.getElementById(elId);
+      if (!el) return;
+      const v = (value || "unknown").toLowerCase();
+      const cls = (v === "online") ? "online" : (v === "offline") ? "offline" : "unknown";
+      el.className = "pill " + cls;
+      el.textContent = v;
+    }
+
+    function escapeHtml(str) {
+      return String(str == null ? "" : str)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    /* =========================================================
+       Charts (Chart.js) — rolling window of recent samples
+       ========================================================= */
+    const MAX_POINTS = 30;
+    let prevProcessed = null, prevInserted = null;
+
+    function makeChart(canvasId, label, color) {
+      const ctx = document.getElementById(canvasId).getContext("2d");
+      const fill = color + "22";
+      return new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: [],
+          datasets: [{
+            label: label,
+            data: [],
+            borderColor: color,
+            backgroundColor: fill,
+            borderWidth: 2,
+            fill: true,
+            tension: 0.35,
+            pointRadius: 0,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { color: "#8b949e", maxTicksLimit: 6 }, grid: { color: "#283040" } },
+            y: { beginAtZero: true, ticks: { color: "#8b949e" }, grid: { color: "#283040" } },
+          },
+        },
+      });
+    }
+
+    const processingChart = makeChart("processingChart", "Processed/s", "#4f8cff");
+    const insertChart     = makeChart("insertChart", "Inserted/s", "#2ea043");
+
+    // Convert cumulative totals into per-second deltas for the charts.
+    function pushChartData(processed, inserted) {
+      const t = new Date().toLocaleTimeString();
+
+      const dProcessed = prevProcessed === null ? 0 : Math.max(0, processed - prevProcessed);
+      const dInserted  = prevInserted  === null ? 0 : Math.max(0, inserted - prevInserted);
+      prevProcessed = processed;
+      prevInserted = inserted;
+
+      addPoint(processingChart, t, dProcessed);
+      addPoint(insertChart, t, dInserted);
+    }
+
+    function addPoint(chart, label, value) {
+      chart.data.labels.push(label);
+      chart.data.datasets[0].data.push(value);
+      if (chart.data.labels.length > MAX_POINTS) {
+        chart.data.labels.shift();
+        chart.data.datasets[0].data.shift();
+      }
+      chart.update("none");
+    }
+
+    /* =========================================================
+       CSV Upload (drag & drop + click) — POST /upload
+       ========================================================= */
+    const dropzone     = document.getElementById("dropzone");
+    const fileInput    = document.getElementById("fileInput");
+    const uploadStatus = document.getElementById("uploadStatus");
+
+    dropzone.addEventListener("click", function () { fileInput.click(); });
+    fileInput.addEventListener("change", function () {
+      if (fileInput.files.length) uploadFile(fileInput.files[0]);
+    });
+
+    ["dragenter", "dragover"].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault(); dropzone.classList.add("dragover");
+      });
+    });
+    ["dragleave", "drop"].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault(); dropzone.classList.remove("dragover");
+      });
+    });
+    dropzone.addEventListener("drop", function (e) {
+      const file = e.dataTransfer.files[0];
+      if (file) uploadFile(file);
+    });
+
+    async function uploadFile(file) {
+      if (!file.name.toLowerCase().endsWith(".csv")) {
+        return setUpload("Please choose a .csv file", "err");
+      }
+      setUpload("Uploading " + file.name + " …", "");
+
+      const form = new FormData();
+      form.append("file", file);   // matches r.FormFile("file") in upload.go
+
+      try {
+        const res = await fetch(API.upload, { method: "POST", body: form });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const out = await res.json();
+        setUpload(
+          "✅ Done — total: " + (out.total ?? 0) +
+          ", inserted: " + (out.inserted ?? 0) +
+          ", failed: " + (out.failed ?? 0),
+          "ok"
+        );
+        // Refresh data right away after an upload.
+        loadStats(); loadActivities();
+      } catch (err) {
+        setUpload("❌ Upload failed: " + err.message, "err");
+      } finally {
+        fileInput.value = "";
+      }
+    }
+
+    function setUpload(msg, kind) {
+      uploadStatus.textContent = msg;
+      uploadStatus.className = "upload-status " + (kind || "");
+    }
+
+    /* =========================================================
+       Boot + refresh loop
+       ========================================================= */
+    async function refreshAll() {
+      await Promise.all([loadStats(), loadActivities(), updateStatus()]);
+      stamp();
+    }
+
+    refreshAll();                       // first load
+    setInterval(refreshAll, REFRESH_MS); // refresh every 1 second
+  </script>
+</body>
+</html>

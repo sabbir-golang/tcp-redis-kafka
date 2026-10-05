@@ -23,13 +23,19 @@ func MsHandle(conn net.Conn) {
 }
 func ConnTCP() {
 	var err error
-	l, err := net.Listen("tcp", ":8080")
+	l, err := net.Listen("tcp", ":9000")
 	if err != nil {
 		fmt.Println("Tcp connection failed")
 		return
 	}
 	listener = l
 	// defer l.Close()
+}
+
+// IsUp reports whether the TCP server is listening. Used by the dashboard
+// /health endpoint so it doesn't have to dial (and spam) the listener.
+func IsUp() bool {
+	return listener != nil
 }
 
 func RcvTcp() {

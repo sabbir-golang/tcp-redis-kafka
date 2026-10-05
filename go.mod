@@ -3,6 +3,7 @@ module kafka_project
 go 1.26.4
 
 require (
+	github.com/lib/pq v1.12.3
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/segmentio/kafka-go v0.4.51
 )
